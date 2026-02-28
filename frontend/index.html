@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vegetation Vision</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+
+    <main class="layout">
+      <aside class="panel">
+        <header class="panel-header">
+          <p class="eyebrow">Vegetation Vision MVP</p>
+          <h1>Corridor Growth Pressure</h1>
+          <p class="subtext">
+            NDVI-driven prioritization for vegetation inspections.
+          </p>
+        </header>
+
+        <section class="controls">
+          <div class="row">
+            <label for="monthRange">Month</label>
+            <span id="monthLabel" class="mono">-</span>
+          </div>
+          <input type="range" id="monthRange" min="0" max="0" value="0" />
+          <div class="row row-compact">
+            <button id="playBtn" class="btn">Play</button>
+            <label class="mini-control">
+              Min Risk
+              <input type="number" id="minRisk" min="0" max="100" value="0" />
+            </label>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-header">
+            <h2>Most At-Risk Corridors</h2>
+          </div>
+          <ul id="topList" class="risk-list"></ul>
+        </section>
+      </aside>
+
+      <section class="map-panel">
+        <div id="map"></div>
+        <div class="detail-card">
+          <div class="detail-head">
+            <div>
+              <p class="eyebrow">Segment</p>
+              <h3 id="segmentTitle">Select a segment</h3>
+            </div>
+            <p id="segmentMeta" class="mono"></p>
+          </div>
+          <svg id="chart" viewBox="0 0 860 210" preserveAspectRatio="none"></svg>
+        </div>
+      </section>
+    </main>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
