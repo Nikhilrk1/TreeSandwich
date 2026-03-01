@@ -1,22 +1,20 @@
 # Frontend Shell
 
-This is a static map UI for the Vegetation Vision MVP.
-
-## Served by FastAPI
-When running `python -m uvicorn backend.main:app --reload`, open:
+Static map UI served by FastAPI at:
 - `http://127.0.0.1:8000/app`
 
-The page calls backend endpoints:
+## Data Source
+The map now uses `future_predictions.csv` via backend endpoints.
+No dummy segment parquet/geojson pipeline is required for frontend operation.
+
+## Endpoints Consumed
 - `/timeline/years`
-- `/map/layer?year=YYYY`
-- `/powerlines/layer?bbox=minx,miny,maxx,maxy`
+- `/map/layer?year=YYYY&bbox=minx,miny,maxx,maxy`
 - `/segments/top?year=YYYY`
 - `/segments/{segment_id}/timeseries`
-- `/segments/{segment_id}/forecast`
+- `/powerlines/layer?bbox=minx,miny,maxx,maxy`
 
 ## Notes
-- The map expects segment geometry from `VV_SEGMENT_GEOJSON`
-  (default: `data/segments.geojson`).
-- The all-US line overlay expects a GeoJSON at `VV_POWERLINES_GEOJSON`
-  (default: `US_Electric_Power_Transmission_Lines_-6976209181916424225.geojson`).
-- Use `scripts/generate_mock_segments.py` for a fast local demo dataset.
+- Circle color is based on distance-to-powerline (`distance_m`).
+- Circle minimum radius is constrained by each record's bounding-box footprint.
+- Circles stay circles at all zoom levels (no line mode).
