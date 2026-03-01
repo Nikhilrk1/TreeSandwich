@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.mask import mask
+from rasterio.transform import xy
+from shapely.geometry import Point
 
 
 def _write_table(df: pd.DataFrame, output: Path) -> None:
@@ -62,9 +64,34 @@ def _compute_stats(arr: np.ndarray, threshold: float) -> dict[str, float | int]:
     }
 
 
+def _min_distance_to_line(
+    arr: np.ndarray,
+    out_transform,
+    line_geom,
+    ndvi_threshold: float,
+) -> float:
+    veg_mask = np.isfinite(arr) & (arr > ndvi_threshold)
+    rows, cols = np.where(veg_mask)
+    if rows.size == 0:
+        return float("nan")
+
+    xs, ys = xy(out_transform, rows, cols, offset="center")
+    min_dist = float("inf")
+    for x, y in zip(xs, ys):
+        dist = line_geom.distance(Point(float(x), float(y)))
+        if dist < min_dist:
+            min_dist = dist
+    return float(min_dist) if np.isfinite(min_dist) else float("nan")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract per-segment NDVI stats from monthly rasters.")
     parser.add_argument("--segments", required=True, help="Segment buffer polygons GeoJSON/Shapefile/GPKG")
+    parser.add_argument(
+        "--centerlines",
+        default=None,
+        help="Optional segment centerline file with same segment ids; enables vegetation distance-to-line calculation.",
+    )
     parser.add_argument("--segment-id-col", default="segment_id")
     parser.add_argument("--raster-glob", required=True, help="Glob path for monthly NDVI rasters")
     parser.add_argument(
@@ -82,6 +109,13 @@ def main() -> None:
     if segments.empty:
         raise ValueError("No segment polygons found.")
 
+    centerlines = None
+    if args.centerlines:
+        centerlines = gpd.read_file(args.centerlines)
+        if args.segment_id_col not in centerlines.columns:
+            raise ValueError(f"Missing segment id column in centerlines: {args.segment_id_col}")
+        centerlines[args.segment_id_col] = centerlines[args.segment_id_col].astype(str)
+
     raster_paths = sorted(Path(p) for p in glob(args.raster_glob))
     if not raster_paths:
         raise ValueError(f"No rasters matched: {args.raster_glob}")
@@ -93,17 +127,38 @@ def main() -> None:
         with rasterio.open(raster_path) as ds:
             seg = segments.to_crs(ds.crs)
             nodata = ds.nodata
+            if centerlines is not None:
+                centerline_local = centerlines.to_crs(ds.crs)
+                line_lookup_local = centerline_local.set_index(args.segment_id_col)["geometry"].to_dict()
+            else:
+                line_lookup_local = None
+
+            if ds.crs and ds.crs.is_geographic and line_lookup_local is not None:
+                print(
+                    f"Warning: raster {raster_path.name} CRS is geographic; "
+                    "distance output will be in degree units, not meters."
+                )
 
             for _, row in seg.iterrows():
-                out, _ = mask(ds, [row.geometry], crop=True, filled=True)
+                out, out_transform = mask(ds, [row.geometry], crop=True, filled=True)
                 arr = out[0].astype("float32")
                 if nodata is not None:
                     arr[arr == nodata] = np.nan
 
                 stats = _compute_stats(arr, args.ndvi_threshold)
+                segment_id = str(row[args.segment_id_col])
+                if line_lookup_local is not None and segment_id in line_lookup_local:
+                    stats["vegetation_distance_m"] = _min_distance_to_line(
+                        arr,
+                        out_transform,
+                        line_lookup_local[segment_id],
+                        args.ndvi_threshold,
+                    )
+                else:
+                    stats["vegetation_distance_m"] = np.nan
                 rows.append(
                     {
-                        "segment_id": str(row[args.segment_id_col]),
+                        "segment_id": segment_id,
                         "date": date,
                         **stats,
                     }

@@ -85,6 +85,9 @@ def build_segment_feature_table(
             "frac_ndvi_gt_0_6": float(np.mean(valid_vals > ndvi_threshold)) if obs_count else float("nan"),
             "ndvi_iqr": _safe_iqr(valid_vals),
         }
+        if "vegetation_distance_m" in group.columns:
+            dist_vals = group["vegetation_distance_m"].dropna().to_numpy(dtype=float)
+            row["vegetation_distance_m"] = float(np.nanmin(dist_vals)) if dist_vals.size else float("nan")
         rows.append(row)
 
     features = pd.DataFrame(rows).sort_values(["segment_id", "date"]).reset_index(drop=True)
@@ -135,5 +138,20 @@ def add_temporal_features(feature_df: pd.DataFrame, anomaly_eps: float = 0.05) -
             raw=True,
         )
     )
+
+    if "vegetation_distance_m" in df.columns:
+        dist_group = df.groupby("segment_id", sort=False)["vegetation_distance_m"]
+        # Positive values represent vegetation moving toward the line.
+        df["growth_amount_m"] = dist_group.transform(lambda s: s.diff() * -1.0).clip(lower=0.0)
+        df["growth_rate_m_per_month"] = (
+            df.groupby("segment_id", sort=False)["growth_amount_m"]
+            .transform(lambda s: s.rolling(window=3, min_periods=1).mean())
+            .fillna(0.0)
+        )
+        df["distance_change_m_3m"] = dist_group.transform(lambda s: s.diff(periods=3) * -1.0)
+    else:
+        df["growth_amount_m"] = np.nan
+        df["growth_rate_m_per_month"] = np.nan
+        df["distance_change_m_3m"] = np.nan
 
     return df.drop(columns=["month"])

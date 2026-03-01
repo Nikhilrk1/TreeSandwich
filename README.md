@@ -2,14 +2,14 @@
 USC Gridhacks powerline vegetation prediction project.
 
 ## Vegetation Vision MVP
-This repository now includes an executable MVP scaffold for NDVI-based
-vegetation growth pressure scoring along power corridors.
+This repository now includes an executable MVP scaffold for NDVI-assisted,
+distance-aware vegetation hazard scoring along power corridors.
 
 ### Structure
 - `docs/vegetation_vision_mvp.md`: product + implementation plan.
 - `vegetation_vision/features.py`: per-segment feature engineering.
-- `vegetation_vision/risk.py`: baseline seasonality-aware risk index.
-- `vegetation_vision/forecast.py`: simple 3/6 month forecast baseline.
+- `vegetation_vision/risk.py`: distance-driven hazard + risk index.
+- `vegetation_vision/forecast.py`: 3/6 month vegetation growth amount forecast.
 - `vegetation_vision/pipeline.py`: CLI to build scored timeseries parquet.
 - `vegetation_vision/segments.py`: corridor segmentation + buffer utilities.
 - `backend/main.py`: FastAPI endpoints for map/panel/chart consumption.
@@ -22,7 +22,12 @@ vegetation growth pressure scoring along power corridors.
 pip install -r requirements.txt
 ```
 
-2. Build feature/risk/forecast output from pixel-level monthly data:
+2. One-command mock demo data generation (fastest way to test frontend):
+```bash
+python scripts/build_mock_demo_data.py --outdir data --segments 160 --months 24
+```
+
+3. Build feature/risk/forecast output from pixel-level monthly data:
 ```bash
 python -m vegetation_vision.pipeline \
   --input data/pixel_samples.parquet \
@@ -39,8 +44,9 @@ Expected input columns:
 Optional input columns:
 - `is_cloud_free` (1/0)
 - `expected_pixels` (int)
+- `vegetation_distance_m` (nearest vegetation distance to line in meters)
 
-3. Generate mock segment geometry for map playback (if you do not yet have
+4. Generate mock segment geometry for map playback (if you do not yet have
    real corridor geometry):
 ```bash
 python scripts/generate_mock_segments.py \
@@ -48,19 +54,19 @@ python scripts/generate_mock_segments.py \
   --output data/segments.geojson
 ```
 
-4. Run API:
+5. Run API:
 ```bash
 uvicorn backend.main:app --reload
 ```
 
-5. Open app:
+6. Open app:
 - `http://127.0.0.1:8000/app`
 
-6. Example endpoints:
+7. Example endpoints:
 - `/health`
-- `/timeline/months`
-- `/map/layer?date=2025-07`
-- `/segments/top?date=2025-07&n=25`
+- `/timeline/years`
+- `/map/layer?year=2025`
+- `/segments/top?year=2025&n=25`
 - `/segments/{segment_id}/timeseries`
 - `/segments/{segment_id}/forecast`
 
@@ -81,6 +87,7 @@ Given monthly NDVI rasters (for example `ndvi_2025-07.tif`) and segment buffers:
 ```bash
 python scripts/extract_segment_ndvi_stats.py \
   --segments data/segments_buffer.geojson \
+  --centerlines data/segments_centerline.geojson \
   --segment-id-col segment_id \
   --raster-glob 'data/ndvi/ndvi_*.tif' \
   --date-regex '(\\d{4}-\\d{2})' \
@@ -101,8 +108,10 @@ python scripts/precompute_monthly_layers.py \
 ```
 
 ### Notes
-- The risk index is a maintenance prioritization signal, not a clearance
-  measurement or fault probability.
+- `hazard_level` is based on vegetation distance-to-line thresholds
+  (`critical <=2m`, `high <=5m`, `medium <=10m`, else `low`).
+- Forecast output focuses on `predicted_growth_amount_m` and projected
+  `predicted_distance_m`, not forecast NDVI.
 - NDVI quality masking and monthly compositing are assumed upstream.
 - Geometry for map playback is loaded from `VV_SEGMENT_GEOJSON`
   (default `data/segments.geojson`).

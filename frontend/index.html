@@ -28,22 +28,19 @@
           <p class="eyebrow">Vegetation Vision MVP</p>
           <h1>Corridor Growth Pressure</h1>
           <p class="subtext">
-            NDVI-driven prioritization for vegetation inspections.
+            Distance-aware vegetation hazard prioritization for line inspections.
           </p>
         </header>
 
         <section class="controls">
           <div class="row">
-            <label for="monthRange">Month</label>
-            <span id="monthLabel" class="mono">-</span>
+            <label for="yearRange">Year</label>
+            <span id="yearLabel" class="mono">-</span>
           </div>
-          <input type="range" id="monthRange" min="0" max="0" value="0" />
+          <input type="range" id="yearRange" min="0" max="0" value="0" />
           <div class="row row-compact">
             <button id="playBtn" class="btn">Play</button>
-            <label class="mini-control">
-              Min Risk
-              <input type="number" id="minRisk" min="0" max="100" value="0" />
-            </label>
+            <span class="mono">Annual Playback</span>
           </div>
         </section>
 

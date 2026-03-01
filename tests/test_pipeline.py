@@ -20,6 +20,7 @@ def _make_synthetic_pixels() -> pd.DataFrame:
                     "is_valid": 1,
                     "is_cloud_free": 1,
                     "expected_pixels": 24,
+                    "vegetation_distance_m": 8.0 - 0.45 * month_idx,
                 }
             )
             rows.append(
@@ -30,6 +31,7 @@ def _make_synthetic_pixels() -> pd.DataFrame:
                     "is_valid": 1,
                     "is_cloud_free": 1,
                     "expected_pixels": 24,
+                    "vegetation_distance_m": 16.0 - 0.05 * month_idx,
                 }
             )
 
@@ -41,7 +43,7 @@ def test_build_timeseries_contains_forecast_and_risk():
     out = build_timeseries(pixel_df)
 
     assert not out.empty
-    assert {"risk_score", "risk_level", "is_forecast", "horizon_months"}.issubset(out.columns)
+    assert {"risk_score", "risk_level", "hazard_level", "is_forecast", "horizon_months"}.issubset(out.columns)
 
     forecast = out[out["is_forecast"]]
     assert len(forecast) == 4  # 2 segments * {3, 6} horizons
@@ -49,6 +51,7 @@ def test_build_timeseries_contains_forecast_and_risk():
     hist = out[(~out["is_forecast"]) & (out["horizon_months"] == 0)].copy()
     latest = hist.sort_values("target_date").groupby("segment_id").tail(1).set_index("segment_id")
     assert latest.loc["seg_a", "risk_score"] >= latest.loc["seg_b", "risk_score"]
+    assert latest.loc["seg_a", "hazard_level"] in {"medium", "high", "critical"}
     assert np.isfinite(latest.loc["seg_a", "risk_confidence"])
 
 
@@ -66,6 +69,7 @@ def test_build_timeseries_from_feature_rows():
             expected_pixels=("expected_pixels", "max"),
             valid_pixel_frac=("is_valid", "mean"),
             cloud_free_ratio=("is_cloud_free", "mean"),
+            vegetation_distance_m=("vegetation_distance_m", "min"),
         )
         .sort_values(["segment_id", "date"])
     )
@@ -74,3 +78,4 @@ def test_build_timeseries_from_feature_rows():
     assert not out.empty
     assert out["is_forecast"].any()
     assert out["risk_score"].between(0, 100).all()
+    assert "predicted_growth_amount_m" in out.columns

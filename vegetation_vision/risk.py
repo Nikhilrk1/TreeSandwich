@@ -1,4 +1,4 @@
-"""Baseline seasonality-aware vegetation growth pressure index."""
+"""Distance-aware vegetation hazard and risk scoring."""
 
 from __future__ import annotations
 
@@ -26,13 +26,25 @@ def _rolling_slope(values: np.ndarray) -> float:
     return float(slope)
 
 
+def _hazard_level_from_distance(distance_m: float | None) -> str:
+    if distance_m is None or pd.isna(distance_m):
+        return "unknown"
+    if distance_m <= 2.0:
+        return "critical"
+    if distance_m <= 5.0:
+        return "high"
+    if distance_m <= 10.0:
+        return "medium"
+    return "low"
+
+
 def compute_risk_scores(
     feature_df: pd.DataFrame,
     horizons_months: tuple[int, int] = (3, 6),
     high_threshold: int = 70,
     medium_threshold: int = 50,
 ) -> pd.DataFrame:
-    """Compute risk score and categorical level for each segment-month row."""
+    """Compute risk score and hazard level for each segment-month row."""
 
     _require_columns(feature_df, {"segment_id", "date", "ndvi_anomaly"})
     df = feature_df.copy()
@@ -58,14 +70,29 @@ def compute_risk_scores(
     pred_candidates = [anom + (h * trend) for h in horizons_months]
     pred_growth_pressure = np.maximum.reduce([np.zeros(len(df), dtype=float), *pred_candidates]).clip(0.0, 3.0)
 
-    raw = (
-        (0.40 * anom.to_numpy())
-        + (0.30 * (trend.to_numpy() * 2.0))
-        + (0.20 * density.to_numpy())
-        + (0.10 * pred_growth_pressure)
+    ndvi_pressure = (
+        (0.45 * ((anom.to_numpy() + 2.0) / 5.0))
+        + (0.30 * ((trend.to_numpy() + 1.0) / 2.0))
+        + (0.25 * (density.to_numpy()))
     )
+    ndvi_pressure = np.clip(ndvi_pressure, 0.0, 1.0)
 
-    score = np.round(100.0 * _sigmoid(raw)).astype(int)
+    distance = pd.to_numeric(df.get("vegetation_distance_m", np.nan), errors="coerce")
+    distance_score = np.clip((12.0 - distance.to_numpy(dtype=float)) / 12.0, 0.0, 1.0)
+    distance_present = ~distance.isna().to_numpy(dtype=bool)
+
+    growth_rate = pd.to_numeric(
+        df.get("growth_rate_m_per_month", df.get("growth_amount_m", np.nan)),
+        errors="coerce",
+    )
+    growth_score = np.clip(growth_rate.fillna(0.0).to_numpy(dtype=float) / 2.0, 0.0, 1.0)
+
+    combined = np.where(
+        distance_present,
+        (0.55 * distance_score) + (0.30 * growth_score) + (0.15 * ndvi_pressure),
+        (0.55 * ndvi_pressure) + (0.45 * np.clip(pred_growth_pressure / 3.0, 0.0, 1.0)),
+    )
+    score = np.round(100.0 * np.clip(combined, 0.0, 1.0)).astype(int)
     df["risk_score"] = np.clip(score, 0, 100)
 
     expected = df.get("expected_pixels", df.get("obs_count", pd.Series(1, index=df.index))).fillna(1)
@@ -78,5 +105,6 @@ def compute_risk_scores(
         "high",
         np.where(df["risk_score"] >= medium_threshold, "medium", "low"),
     )
+    df["hazard_level"] = distance.map(_hazard_level_from_distance)
 
     return df

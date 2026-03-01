@@ -18,8 +18,12 @@ def _write_fixture_tables(tmp_path: Path) -> tuple[Path, Path]:
             "is_forecast": False,
             "ndvi_median": 0.55,
             "ndvi_anomaly": 0.6,
+            "growth_amount_m": 0.8,
+            "growth_rate_m_per_month": 0.26,
+            "vegetation_distance_m": 4.2,
             "risk_score": 74,
             "risk_level": "high",
+            "hazard_level": "high",
             "risk_confidence": 0.9,
             "obs_count": 20,
             "expected_pixels": 24,
@@ -32,8 +36,12 @@ def _write_fixture_tables(tmp_path: Path) -> tuple[Path, Path]:
             "is_forecast": False,
             "ndvi_median": 0.42,
             "ndvi_anomaly": 0.1,
+            "growth_amount_m": 0.2,
+            "growth_rate_m_per_month": 0.05,
+            "vegetation_distance_m": 12.0,
             "risk_score": 48,
             "risk_level": "low",
+            "hazard_level": "low",
             "risk_confidence": 0.85,
             "obs_count": 21,
             "expected_pixels": 24,
@@ -44,10 +52,15 @@ def _write_fixture_tables(tmp_path: Path) -> tuple[Path, Path]:
             "target_date": "2025-09-01",
             "horizon_months": 3,
             "is_forecast": True,
-            "ndvi_median": 0.58,
+            "ndvi_median": None,
             "ndvi_anomaly": 0.75,
+            "predicted_growth_amount_m": 1.1,
+            "growth_lower_m": 0.8,
+            "growth_upper_m": 1.4,
+            "predicted_distance_m": 3.1,
             "risk_score": 79,
             "risk_level": "high",
+            "hazard_level": "high",
             "risk_confidence": 0.9,
             "obs_count": 0,
             "expected_pixels": 24,
@@ -94,22 +107,22 @@ def _client_with_env(monkeypatch, data_path: Path, segment_path: Path) -> TestCl
     return TestClient(mod.app)
 
 
-def test_timeline_months(monkeypatch, tmp_path: Path):
+def test_timeline_years(monkeypatch, tmp_path: Path):
     data_path, segment_path = _write_fixture_tables(tmp_path)
     client = _client_with_env(monkeypatch, data_path, segment_path)
 
-    resp = client.get("/timeline/months")
+    resp = client.get("/timeline/years")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["months"] == ["2025-06"]
-    assert payload["default"] == "2025-06"
+    assert payload["years"] == [2025]
+    assert payload["default"] == 2025
 
 
 def test_map_layer(monkeypatch, tmp_path: Path):
     data_path, segment_path = _write_fixture_tables(tmp_path)
     client = _client_with_env(monkeypatch, data_path, segment_path)
 
-    resp = client.get("/map/layer", params={"date": "2025-06", "min_risk": 70})
+    resp = client.get("/map/layer", params={"year": 2025, "min_risk": 70})
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["type"] == "FeatureCollection"
@@ -117,16 +130,18 @@ def test_map_layer(monkeypatch, tmp_path: Path):
     props = payload["features"][0]["properties"]
     assert props["segment_id"] == "seg_0001"
     assert props["risk_score"] == 74.0
+    assert props["hazard_level"] == "high"
 
 
 def test_top_segments_includes_forecast_columns(monkeypatch, tmp_path: Path):
     data_path, segment_path = _write_fixture_tables(tmp_path)
     client = _client_with_env(monkeypatch, data_path, segment_path)
 
-    resp = client.get("/segments/top", params={"date": "2025-06", "n": 5})
+    resp = client.get("/segments/top", params={"year": 2025, "n": 5})
     assert resp.status_code == 200
     payload = resp.json()
     assert payload
     top = payload[0]
-    assert "forecast_risk_3m" in top
-    assert "forecast_risk_6m" in top
+    assert "forecast_growth_3m_m" in top
+    assert "forecast_growth_6m_m" in top
+    assert "hazard_level" in top

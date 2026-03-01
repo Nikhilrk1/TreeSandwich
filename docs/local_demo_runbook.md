@@ -14,6 +14,11 @@ python scripts/generate_mock_pixels.py \
   --pixels 30
 ```
 
+Alternative (single command for all mock artifacts):
+```bash
+python scripts/build_mock_demo_data.py --outdir data --segments 120 --months 18
+```
+
 ## 3) Build segment timeseries (risk + forecast)
 ```bash
 python -m vegetation_vision.pipeline \
@@ -37,7 +42,7 @@ Open:
 - `http://127.0.0.1:8000/app`
 
 ## 6) Demo flow
-1. Drag slider month-by-month.
-2. Show changing hotspots.
+1. Drag slider year-by-year.
+2. Show changing hazard hotspots.
 3. Open top risk panel and click top segment.
-4. Explain historical vs forecast chart with confidence band.
+4. Explain historical vs forecast vegetation growth amount with confidence band.
