@@ -112,3 +112,13 @@ python scripts/precompute_monthly_layers.py \
   - Download the Fhsh and wildlife power line dataset from https://gis-fws.opendata.arcgis.com/datasets/fws::us-electric-power-transmission-lines/explore?location=34.140142%2C-81.587457%2C9. Name it lines.geojson 
   - Run createSatteliteImages.py
   - example for SC:  python createSatteliteImages.py --input lines.geojson --outdir out_tiles_gee --size 1024 --dpi 150 --dataset naip --lookback 5 --sc-only
+
+## How to Train and Use the Custom Vision Transformer
+- Use a corridor CSV (for example `ViT/tree_line_distance_compare.csv`) plus the matching tiles in `ViT/images`.
+- Train the model with:
+  - `bash ViT/train_vit.sh`
+- Run inference on new CSV data with:
+  - `bash ViT/vit_infer.sh`
+- Script notes:
+  - `ViT/train_vit.sh` trains and saves the checkpoint (currently `ViT/models`).
+  - `ViT/vit_infer.sh` can build/update metadata cache and then run `--mode infer` to write prediction CSV output.
