@@ -15,6 +15,10 @@ from fastapi.staticfiles import StaticFiles
 
 DATA_PATH = os.getenv("VV_DATA_PATH", "data/segment_timeseries.parquet")
 SEGMENT_GEOJSON_PATH = os.getenv("VV_SEGMENT_GEOJSON", "data/segments.geojson")
+POWERLINES_GEOJSON_PATH = os.getenv(
+    "VV_POWERLINES_GEOJSON",
+    "US_Electric_Power_Transmission_Lines_-6976209181916424225.geojson",
+)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 app = FastAPI(title="Vegetation Vision API", version="0.1.0")
@@ -186,6 +190,31 @@ def _load_segment_geojson() -> dict[str, object]:
     return payload
 
 
+@lru_cache(maxsize=1)
+def _load_powerline_index() -> dict[str, object]:
+    if not os.path.exists(POWERLINES_GEOJSON_PATH):
+        raise FileNotFoundError(
+            f"Powerline GeoJSON not found at {POWERLINES_GEOJSON_PATH}. "
+            "Set VV_POWERLINES_GEOJSON to your US lines dataset."
+        )
+
+    with open(POWERLINES_GEOJSON_PATH, encoding="utf-8") as f:
+        payload = json.load(f)
+    if payload.get("type") != "FeatureCollection":
+        raise ValueError("Powerline GeoJSON must be a FeatureCollection.")
+
+    indexed: list[tuple[tuple[float, float, float, float], dict[str, object]]] = []
+    for feature in payload.get("features", []):
+        fb = _feature_bbox(feature.get("geometry", {}))
+        indexed.append((fb, feature))
+
+    return {
+        "type": "FeatureCollection",
+        "crs": payload.get("crs"),
+        "features": indexed,
+    }
+
+
 def _historical_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df[(df["horizon_months"] == 0) & (~df["is_forecast"].astype(bool))].copy()
 
@@ -286,6 +315,7 @@ def timeline_years() -> dict[str, object]:
 def reload_data() -> dict[str, str]:
     _load_data.cache_clear()
     _load_segment_geojson.cache_clear()
+    _load_powerline_index.cache_clear()
     return {"status": "reloaded"}
 
 
@@ -499,6 +529,47 @@ def map_layer(
         )
 
     return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/powerlines/layer")
+def powerlines_layer(
+    bbox: str | None = Query(
+        None,
+        description="Optional extent filter as 'minx,miny,maxx,maxy' in EPSG:4326",
+    ),
+    max_features: int = Query(15000, ge=100, le=200000),
+) -> dict[str, object]:
+    try:
+        powerlines = _load_powerline_index()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    bbox_filter = _normalize_bbox(bbox) if bbox else None
+
+    matched = 0
+    truncated = False
+    out_features: list[dict[str, object]] = []
+    for fb, feature in powerlines["features"]:
+        if bbox_filter and not _bbox_intersects(fb, bbox_filter):
+            continue
+        matched += 1
+        out_features.append(feature)
+        if len(out_features) >= max_features:
+            truncated = True
+            break
+
+    payload: dict[str, object] = {
+        "type": "FeatureCollection",
+        "features": out_features,
+        "meta": {
+            "matched": matched,
+            "returned": len(out_features),
+            "truncated": truncated,
+        },
+    }
+    if powerlines.get("crs") is not None:
+        payload["crs"] = powerlines.get("crs")
+    return payload
 
 
 @app.get("/segments/{segment_id}/timeseries")
