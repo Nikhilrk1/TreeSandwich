@@ -120,7 +120,7 @@ python scripts/precompute_monthly_layers.py \
   (default `US_Electric_Power_Transmission_Lines_-6976209181916424225.geojson`).
 
 
-  ### How To Generate Satellite Images
+  # How To Generate Satellite Images
   - Download the Fhsh and wildlife power line dataset from https://gis-fws.opendata.arcgis.com/datasets/fws::us-electric-power-transmission-lines/explore?location=34.140142%2C-81.587457%2C9. Name it lines.geojson 
   - Run createSatteliteImages.py
   - example for SC:  python createSatteliteImages.py --input lines.geojson --outdir out_tiles_gee --size 1024 --dpi 150 --dataset naip --lookback 5 --sc-only
