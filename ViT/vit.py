@@ -126,14 +126,39 @@ def _resolve_now_image_path(row: pd.Series, images_dir: Path) -> Optional[Path]:
 
 def _compute_meta_features(df: pd.DataFrame) -> np.ndarray:
     points_by_year: Dict[int, List[Dict[str, object]]] = {}
+    dropped_bad_geo = 0
     for idx, row in df.iterrows():
-        year = int(row["past_year_used"])
+        try:
+            year = int(float(row["past_year_used"]))
+            lon = float(row["past_tree_lon"])
+            lat = float(row["past_tree_lat"])
+        except (TypeError, ValueError):
+            dropped_bad_geo += 1
+            continue
+
+        if (
+            not np.isfinite(lon)
+            or not np.isfinite(lat)
+            or lon < -180.0
+            or lon > 180.0
+            or lat < -90.0
+            or lat > 90.0
+        ):
+            dropped_bad_geo += 1
+            continue
+
         points_by_year.setdefault(year, []).append(
             {
                 "id": int(idx),
-                "lon": float(row["past_tree_lon"]),
-                "lat": float(row["past_tree_lat"]),
+                "lon": lon,
+                "lat": lat,
             }
+        )
+
+    if dropped_bad_geo:
+        print(
+            f"Warning: skipped {dropped_bad_geo} rows with invalid past_tree_lon/past_tree_lat "
+            "when querying metadata APIs."
         )
 
     ndvi_map: Dict[int, float] = {}
@@ -142,9 +167,15 @@ def _compute_meta_features(df: pd.DataFrame) -> np.ndarray:
     winter_map: Dict[int, float] = {}
 
     for year, points in points_by_year.items():
-        ndvi_res = batch_average_ndvi_for_year(points, year=year)
-        precip_res = batch_average_precip_last_year(points, year=year)
-        temp_res = batch_average_temp_summer_winter(points, year=year)
+        try:
+            ndvi_res = batch_average_ndvi_for_year(points, year=year)
+            precip_res = batch_average_precip_last_year(points, year=year)
+            temp_res = batch_average_temp_summer_winter(points, year=year)
+        except Exception as exc:
+            print(
+                f"Warning: metadata API query failed for year={year} with {len(points)} points: {exc}"
+            )
+            continue
 
         for r in ndvi_res:
             ndvi_map[int(r["id"])] = float(r["ndvi"]) if r["ndvi"] is not None else np.nan
@@ -570,19 +601,31 @@ def inference_from_cache(
     model.eval()
 
     source = pd.read_csv(csv_file)
-    cache = pd.read_csv(cache_file)
 
     key_cols = ["feature_id", "section_id", "past_year_used"]
-    required_cache_cols = key_cols + [
+    meta_cols = [
         "meta_tree_num",
         "meta_ndvi",
         "meta_precip",
         "meta_summer_c",
         "meta_winter_c",
     ]
-    missing_cache = [c for c in required_cache_cols if c not in cache.columns]
-    if missing_cache:
-        raise ValueError(f"Missing required cache columns in {cache_file}: {missing_cache}")
+    required_cache_cols = key_cols + meta_cols
+
+    if cache_file.exists():
+        cache = pd.read_csv(cache_file)
+        missing_cache = [c for c in required_cache_cols if c not in cache.columns]
+        if missing_cache:
+            print(
+                f"Warning: cache file {cache_file} missing expected columns {missing_cache}. "
+                "Starting with empty cache for inference."
+            )
+            cache = pd.DataFrame(columns=required_cache_cols)
+        else:
+            cache = cache[required_cache_cols].copy()
+    else:
+        print(f"Warning: cache file not found at {cache_file}; starting with empty cache.")
+        cache = pd.DataFrame(columns=required_cache_cols)
 
     if {"center_lon", "center_lat"}.issubset(source.columns):
         coord_lon_col = "center_lon"
@@ -602,6 +645,9 @@ def inference_from_cache(
         "now_distance_m",
         coord_lon_col,
         coord_lat_col,
+        "past_tree_lon",
+        "past_tree_lat",
+        "past_ntrees",
     ]
     missing_source = [c for c in required_source_cols if c not in source.columns]
     if missing_source:
@@ -614,7 +660,7 @@ def inference_from_cache(
         cache[c] = cache[c].astype(str)
 
     source = source.drop_duplicates(subset=key_cols, keep="first")
-    merged = cache.merge(source[required_source_cols], on=key_cols, how="left")
+    merged = source[required_source_cols].merge(cache[required_cache_cols], on=key_cols, how="left")
 
     numeric_cols = [
         "now_year_used",
@@ -622,19 +668,50 @@ def inference_from_cache(
         "now_distance_m",
         coord_lon_col,
         coord_lat_col,
-        "meta_tree_num",
-        "meta_ndvi",
-        "meta_precip",
-        "meta_summer_c",
-        "meta_winter_c",
+        "past_tree_lon",
+        "past_tree_lat",
+        "past_ntrees",
+        *meta_cols,
     ]
     for col in numeric_cols:
         merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
-    valid_mask = merged[numeric_cols].notna().all(axis=1)
+    missing_meta_mask = merged[meta_cols].isna().any(axis=1)
+    missing_meta_count = int(missing_meta_mask.sum())
+    if missing_meta_count:
+        print(f"Metadata cache misses during inference: {missing_meta_count}; computing from source CSV.")
+        compute_df = merged.loc[
+            missing_meta_mask,
+            key_cols + ["past_tree_lon", "past_tree_lat", "past_ntrees"],
+        ].reset_index(drop=True)
+        computed = _compute_meta_features(compute_df)
+        merged.loc[missing_meta_mask, "meta_tree_num"] = computed[:, 0]
+        merged.loc[missing_meta_mask, "meta_ndvi"] = computed[:, 1]
+        merged.loc[missing_meta_mask, "meta_precip"] = computed[:, 2]
+        merged.loc[missing_meta_mask, "meta_summer_c"] = computed[:, 3]
+        merged.loc[missing_meta_mask, "meta_winter_c"] = computed[:, 4]
+
+        refreshed_cache = merged[key_cols + meta_cols].copy()
+        for c in key_cols:
+            refreshed_cache[c] = refreshed_cache[c].astype(str)
+        combined_cache = pd.concat([cache[required_cache_cols], refreshed_cache], ignore_index=True)
+        combined_cache = combined_cache.drop_duplicates(subset=key_cols, keep="last")
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        combined_cache.to_csv(cache_file, index=False)
+        print(f"Saved metadata cache rows: {len(combined_cache)} to {cache_file}")
+
+    required_inference_cols = [
+        "now_year_used",
+        "delta_distance_m",
+        "now_distance_m",
+        coord_lon_col,
+        coord_lat_col,
+        *meta_cols,
+    ]
+    valid_mask = merged[required_inference_cols].notna().all(axis=1)
     merged = merged.loc[valid_mask].reset_index(drop=True)
     if merged.empty:
-        raise ValueError("No valid rows available after joining cache with source CSV.")
+        raise ValueError("No valid rows available after cache/source merge and metadata refresh.")
 
     image_paths: List[Path] = []
     keep_rows: List[int] = []
@@ -724,9 +801,9 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
+    ee.Authenticate()
+    ee.Initialize(project='caramel-park-488923-j2')
     if args.mode == "train":
-        ee.Authenticate()
-        ee.Initialize(project='caramel-park-488923-j2')
         train(
             csv_path=args.csv,
             images_dir=args.images_dir,
