@@ -101,6 +101,29 @@ def _resolve_image_path(row: pd.Series, images_dir: Path) -> Optional[Path]:
     return None
 
 
+def _build_now_image_candidates(
+    feature_id: object,
+    section_id: object,
+    now_year_used: object,
+) -> List[str]:
+    stem = f"tile_{feature_id}_{section_id}_now_{now_year_used}"
+    exts = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ""]
+    return [f"{stem}{ext}" for ext in exts]
+
+
+def _resolve_now_image_path(row: pd.Series, images_dir: Path) -> Optional[Path]:
+    candidates = _build_now_image_candidates(
+        row["feature_id"],
+        row["section_id"],
+        int(float(row["now_year_used"])),
+    )
+    for name in candidates:
+        p = images_dir / name
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
 def _compute_meta_features(df: pd.DataFrame) -> np.ndarray:
     points_by_year: Dict[int, List[Dict[str, object]]] = {}
     for idx, row in df.iterrows():
@@ -469,6 +492,15 @@ def train(
     print(f"Model saved to {save_file.resolve()}")
 
 
+def _load_checkpoint(checkpoint_path: Path, device: torch.device):
+    # PyTorch 2.6 defaults to weights_only=True, which can fail when the checkpoint
+    # includes numpy metadata. For local trusted checkpoints, load with weights_only=False.
+    try:
+        return torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=device)
+
+
 def inference(
     model_path: str,
     image_path: str,
@@ -477,7 +509,7 @@ def inference(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Inference on: {device}")
 
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = _load_checkpoint(Path(model_path), device)
     meta_dim = int(checkpoint["meta_dim"])
 
     if len(meta_features) != meta_dim:
@@ -508,8 +540,164 @@ def inference(
     return value
 
 
+def inference_from_cache(
+    model_path: str,
+    csv_path: str,
+    images_dir: str,
+    meta_cache_csv: str,
+    output_csv: str,
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Inference on: {device}")
+
+    model_file = Path(model_path)
+    csv_file = Path(csv_path)
+    img_dir = Path(images_dir)
+    cache_file = Path(meta_cache_csv)
+    out_file = Path(output_csv)
+
+    checkpoint = _load_checkpoint(model_file, device)
+    meta_dim = int(checkpoint["meta_dim"])
+    if meta_dim != 5:
+        raise ValueError(
+            f"Unsupported checkpoint meta_dim={meta_dim}. "
+            "Current training expects 5 metadata features."
+        )
+
+    processor = AutoImageProcessor.from_pretrained("apple/mobilevit-small")
+    model = ImageMetaRegressor(meta_dim=meta_dim).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    source = pd.read_csv(csv_file)
+    cache = pd.read_csv(cache_file)
+
+    key_cols = ["feature_id", "section_id", "past_year_used"]
+    required_cache_cols = key_cols + [
+        "meta_tree_num",
+        "meta_ndvi",
+        "meta_precip",
+        "meta_summer_c",
+        "meta_winter_c",
+    ]
+    missing_cache = [c for c in required_cache_cols if c not in cache.columns]
+    if missing_cache:
+        raise ValueError(f"Missing required cache columns in {cache_file}: {missing_cache}")
+
+    if {"center_lon", "center_lat"}.issubset(source.columns):
+        coord_lon_col = "center_lon"
+        coord_lat_col = "center_lat"
+    elif {"past_tree_lon", "past_tree_lat"}.issubset(source.columns):
+        coord_lon_col = "past_tree_lon"
+        coord_lat_col = "past_tree_lat"
+    else:
+        raise ValueError(
+            f"Source CSV must contain coordinates via center_lon/center_lat "
+            f"or past_tree_lon/past_tree_lat: {csv_file}"
+        )
+
+    required_source_cols = key_cols + [
+        "now_year_used",
+        "delta_distance_m",
+        "now_distance_m",
+        coord_lon_col,
+        coord_lat_col,
+    ]
+    missing_source = [c for c in required_source_cols if c not in source.columns]
+    if missing_source:
+        raise ValueError(f"Missing required source columns in {csv_file}: {missing_source}")
+
+    source = source.copy()
+    cache = cache.copy()
+    for c in key_cols:
+        source[c] = source[c].astype(str)
+        cache[c] = cache[c].astype(str)
+
+    source = source.drop_duplicates(subset=key_cols, keep="first")
+    merged = cache.merge(source[required_source_cols], on=key_cols, how="left")
+
+    numeric_cols = [
+        "now_year_used",
+        "delta_distance_m",
+        "now_distance_m",
+        coord_lon_col,
+        coord_lat_col,
+        "meta_tree_num",
+        "meta_ndvi",
+        "meta_precip",
+        "meta_summer_c",
+        "meta_winter_c",
+    ]
+    for col in numeric_cols:
+        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+    valid_mask = merged[numeric_cols].notna().all(axis=1)
+    merged = merged.loc[valid_mask].reset_index(drop=True)
+    if merged.empty:
+        raise ValueError("No valid rows available after joining cache with source CSV.")
+
+    image_paths: List[Path] = []
+    keep_rows: List[int] = []
+    for i, row in merged.iterrows():
+        img_path = _resolve_now_image_path(row, img_dir)
+        if img_path is not None:
+            image_paths.append(img_path)
+            keep_rows.append(i)
+
+    if not keep_rows:
+        raise ValueError(
+            f"No valid rows had matching now-images in {img_dir}. "
+            "Expected names like tile_{feature_id}_{section_id}_now_{now_year_used}.png"
+        )
+
+    if len(keep_rows) < len(merged):
+        print(
+            f"Warning: {len(merged) - len(keep_rows)} rows dropped because now-images were not found."
+        )
+
+    merged = merged.iloc[keep_rows].reset_index(drop=True)
+    meta = merged[
+        ["meta_tree_num", "meta_ndvi", "meta_precip", "meta_summer_c", "meta_winter_c"]
+    ].to_numpy(dtype=np.float32)
+
+    meta_mean = checkpoint.get("meta_mean")
+    meta_std = checkpoint.get("meta_std")
+    if meta_mean is not None and meta_std is not None:
+        meta = (meta - meta_mean) / np.where(meta_std == 0, 1.0, meta_std)
+
+    if not np.isfinite(meta).all():
+        raise ValueError("Inference metadata contains non-finite values.")
+
+    preds: List[float] = []
+    for i in range(len(merged)):
+        image = Image.open(image_paths[i]).convert("RGB")
+        inputs = processor(images=[image], return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(device)
+        meta_tensor = torch.tensor(meta[i : i + 1], dtype=torch.float32, device=device)
+        with torch.no_grad():
+            pred = model(pixel_values=pixel_values, meta_features=meta_tensor)
+        preds.append(float(pred.cpu().numpy()[0]))
+
+    output = pd.DataFrame(
+        {
+            "feature_id": merged["feature_id"],
+            "section_id": merged["section_id"],
+            "coord_lon": merged[coord_lon_col].astype(np.float32),
+            "coord_lat": merged[coord_lat_col].astype(np.float32),
+            "now_distance_m": merged["now_distance_m"].astype(np.float32),
+            "predicted_future_delta_distance_m": np.array(preds, dtype=np.float32),
+            "image_path": [str(p) for p in image_paths],
+        }
+    )
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    output.to_csv(out_file, index=False)
+    print(f"Saved inference predictions: {len(output)} rows to {out_file.resolve()}")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ViT + metadata regressor for treeline distance.")
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "infer"])
     parser.add_argument("--csv", type=str, required=True, help="Training CSV path")
     parser.add_argument("--images-dir", type=str, default="ViT/images", help="Directory with tiles")
     parser.add_argument("--save-path", type=str, default="image_meta_regressor.pt")
@@ -524,22 +712,48 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--train-ratio", type=float, default=0.8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--model-path", type=str, default=None, help="Checkpoint path for inference mode.")
+    parser.add_argument(
+        "--inference-output-csv",
+        type=str,
+        default=None,
+        help="Output CSV for inference results. Defaults to <cache_stem>_predictions.csv.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    ee.Authenticate()
-    ee.Initialize(project='caramel-park-488923-j2')
-
-    train(
-        csv_path=args.csv,
-        images_dir=args.images_dir,
-        save_path=args.save_path,
-        meta_cache_csv=args.meta_cache_csv,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        train_ratio=args.train_ratio,
-        seed=args.seed,
-    )
+    if args.mode == "train":
+        ee.Authenticate()
+        ee.Initialize(project='caramel-park-488923-j2')
+        train(
+            csv_path=args.csv,
+            images_dir=args.images_dir,
+            save_path=args.save_path,
+            meta_cache_csv=args.meta_cache_csv,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            train_ratio=args.train_ratio,
+            seed=args.seed,
+        )
+    else:
+        cache_file = (
+            Path(args.meta_cache_csv)
+            if args.meta_cache_csv is not None
+            else Path(args.csv).with_name(f"{Path(args.csv).stem}_meta_cache.csv")
+        )
+        model_file = args.model_path if args.model_path is not None else args.save_path
+        output_csv = (
+            args.inference_output_csv
+            if args.inference_output_csv is not None
+            else str(cache_file.with_name(f"{cache_file.stem}_predictions.csv"))
+        )
+        inference_from_cache(
+            model_path=model_file,
+            csv_path=args.csv,
+            images_dir=args.images_dir,
+            meta_cache_csv=str(cache_file),
+            output_csv=output_csv,
+        )
