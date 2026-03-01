@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import ee
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -70,12 +71,18 @@ class TreelineDataset(Dataset):
         }
 
 
-def _build_image_candidates(feature_id: object, section_id: object, past_year_used: object) -> List[str]:
-    stem_old = f"tile_{feature_id}_{section_id}_old_{past_year_used}"
-    stem_now = f"tile_{feature_id}_{section_id}_now_{past_year_used}"
+def _build_image_candidates(
+    feature_id: object,
+    section_id: object,
+    past_year_used: object,
+) -> List[str]:
+    stems = [
+        f"tile_{feature_id}_{section_id}_past_{past_year_used}",
+        f"tile_{feature_id}_{section_id}_old_{past_year_used}",
+    ]
     exts = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ""]
-    names = []
-    for stem in (stem_old, stem_now):
+    names: List[str] = []
+    for stem in stems:
         for ext in exts:
             names.append(f"{stem}{ext}")
     return names
@@ -83,7 +90,9 @@ def _build_image_candidates(feature_id: object, section_id: object, past_year_us
 
 def _resolve_image_path(row: pd.Series, images_dir: Path) -> Optional[Path]:
     candidates = _build_image_candidates(
-        row["feature_id"], row["section_id"], int(row["past_year_used"])
+        row["feature_id"],
+        row["section_id"],
+        int(float(row["past_year_used"])),
     )
     for name in candidates:
         p = images_dir / name
@@ -144,6 +153,9 @@ def _compute_meta_features(df: pd.DataFrame) -> np.ndarray:
 
     meta = np.array(meta_rows, dtype=np.float32)
 
+    finite_mask = np.isfinite(meta)
+    meta[~finite_mask] = np.nan
+
     col_means = np.nanmean(meta, axis=0)
     all_nan_cols = np.isnan(col_means)
     col_means[all_nan_cols] = 0.0
@@ -152,10 +164,71 @@ def _compute_meta_features(df: pd.DataFrame) -> np.ndarray:
     if missing_mask.any():
         meta[missing_mask] = np.take(col_means, np.where(missing_mask)[1])
 
+    if not np.isfinite(meta).all():
+        raise ValueError("Meta features still contain non-finite values after imputation.")
+
     return meta
 
 
-def _load_training_frame(csv_path: Path, images_dir: Path) -> Tuple[pd.DataFrame, List[Path], np.ndarray, np.ndarray]:
+def _compute_or_load_meta_features(df: pd.DataFrame, meta_cache_csv: Path) -> np.ndarray:
+    key_cols = ["feature_id", "section_id", "past_year_used"]
+    meta_cols = ["meta_tree_num", "meta_ndvi", "meta_precip", "meta_summer_c", "meta_winter_c"]
+    cache_cols = key_cols + meta_cols
+
+    work = df.copy()
+    for c in key_cols:
+        work[c] = work[c].astype(str)
+    work["meta_tree_num"] = work["past_ntrees"].astype(np.float32)
+
+    cached = pd.DataFrame(columns=cache_cols)
+    if meta_cache_csv.exists():
+        cached = pd.read_csv(meta_cache_csv)
+        if not set(cache_cols).issubset(cached.columns):
+            cached = pd.DataFrame(columns=cache_cols)
+        else:
+            cached = cached[cache_cols].copy()
+            for c in key_cols:
+                cached[c] = cached[c].astype(str)
+        print(f"Loaded metadata cache rows: {len(cached)} from {meta_cache_csv}")
+
+    merged = work.merge(cached, on=key_cols, how="left", suffixes=("", "_cached"))
+
+    for c in meta_cols:
+        merged[c] = pd.to_numeric(merged[c], errors="coerce")
+    missing_meta_mask = merged[meta_cols].isna().any(axis=1)
+    missing_count = int(missing_meta_mask.sum())
+
+    if missing_count:
+        print(f"Metadata cache misses: {missing_count}; querying APIs for missing rows.")
+        missing_df = df.loc[missing_meta_mask.values].reset_index(drop=True)
+        computed = _compute_meta_features(missing_df)
+        merged.loc[missing_meta_mask, "meta_tree_num"] = computed[:, 0]
+        merged.loc[missing_meta_mask, "meta_ndvi"] = computed[:, 1]
+        merged.loc[missing_meta_mask, "meta_precip"] = computed[:, 2]
+        merged.loc[missing_meta_mask, "meta_summer_c"] = computed[:, 3]
+        merged.loc[missing_meta_mask, "meta_winter_c"] = computed[:, 4]
+    else:
+        print("Metadata cache hit for all rows; no API calls needed.")
+
+    meta = merged[meta_cols].to_numpy(dtype=np.float32)
+    if not np.isfinite(meta).all():
+        raise ValueError("Meta cache contains non-finite values after refresh.")
+
+    refreshed_cache = merged[cache_cols].copy()
+    combined_cache = pd.concat([cached, refreshed_cache], ignore_index=True)
+    combined_cache = combined_cache.drop_duplicates(subset=key_cols, keep="last")
+    meta_cache_csv.parent.mkdir(parents=True, exist_ok=True)
+    combined_cache.to_csv(meta_cache_csv, index=False)
+    print(f"Saved metadata cache rows: {len(combined_cache)} to {meta_cache_csv}")
+
+    return meta
+
+
+def _load_training_frame(
+    csv_path: Path,
+    images_dir: Path,
+    meta_cache_csv: Path,
+) -> Tuple[pd.DataFrame, List[Path], np.ndarray, np.ndarray]:
     df = pd.read_csv(csv_path)
 
     required_cols = [
@@ -173,6 +246,43 @@ def _load_training_frame(csv_path: Path, images_dir: Path) -> Tuple[pd.DataFrame
 
     df = df.copy().reset_index(drop=True)
 
+    # Coerce numeric training fields so malformed values are treated as missing.
+    numeric_cols = [
+        "past_year_used",
+        "past_tree_lon",
+        "past_tree_lat",
+        "past_ntrees",
+        "delta_distance_m",
+    ]
+    if "now_year_used" in df.columns:
+        numeric_cols.append("now_year_used")
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Drop rows that are missing required training values.
+    missing_required_mask = df[required_cols].isna().any(axis=1)
+    dropped_missing_required = int(missing_required_mask.sum())
+    if dropped_missing_required:
+        print(
+            f"Warning: {dropped_missing_required} rows dropped because required values were missing."
+        )
+    df = df.loc[~missing_required_mask].reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No rows remain after filtering missing required training values.")
+
+    # Drop rows with negative targets.
+    non_negative_target_mask = df["delta_distance_m"].ge(0)
+    dropped_negative_targets = int((~non_negative_target_mask).sum())
+    if dropped_negative_targets:
+        print(
+            f"Warning: {dropped_negative_targets} rows dropped because delta_distance_m was negative."
+        )
+    df = df.loc[non_negative_target_mask].reset_index(drop=True)
+    if df.empty:
+        raise ValueError(
+            "No rows remain after filtering delta_distance_m. All targets were negative."
+        )
+
     image_paths: List[Path] = []
     keep_rows: List[int] = []
 
@@ -185,7 +295,7 @@ def _load_training_frame(csv_path: Path, images_dir: Path) -> Tuple[pd.DataFrame
     if not keep_rows:
         raise ValueError(
             f"No training rows had a matching image in {images_dir}. "
-            "Expected names like tile_{feature_id}_{section_id}_old_{past_year_used}.png"
+            "Expected names like tile_{feature_id}_{section_id}_past_{past_year_used}.png"
         )
 
     if len(keep_rows) < len(df):
@@ -195,7 +305,7 @@ def _load_training_frame(csv_path: Path, images_dir: Path) -> Tuple[pd.DataFrame
 
     df = df.iloc[keep_rows].reset_index(drop=True)
 
-    meta = _compute_meta_features(df)
+    meta = _compute_or_load_meta_features(df, meta_cache_csv=meta_cache_csv)
     targets = df["delta_distance_m"].astype(np.float32).to_numpy()
 
     return df, image_paths, meta, targets
@@ -223,6 +333,7 @@ def train(
     csv_path: str,
     images_dir: str,
     save_path: str = "image_meta_regressor.pt",
+    meta_cache_csv: Optional[str] = None,
     epochs: int = 10,
     batch_size: int = 8,
     lr: float = 1e-4,
@@ -234,13 +345,27 @@ def train(
 
     csv_file = Path(csv_path)
     img_dir = Path(images_dir)
+    cache_file = (
+        Path(meta_cache_csv)
+        if meta_cache_csv is not None
+        else csv_file.with_name(f"{csv_file.stem}_meta_cache.csv")
+    )
 
-    _, image_paths, meta, targets = _load_training_frame(csv_file, img_dir)
+    _, image_paths, meta, targets = _load_training_frame(
+        csv_file,
+        img_dir,
+        meta_cache_csv=cache_file,
+    )
+
+    if not np.isfinite(targets).all():
+        raise ValueError("Targets contain non-finite values after filtering.")
 
     meta_mean = meta.mean(axis=0, keepdims=True)
     meta_std = meta.std(axis=0, keepdims=True)
     meta_std[meta_std == 0] = 1.0
     meta_norm = (meta - meta_mean) / meta_std
+    if not np.isfinite(meta_norm).all():
+        raise ValueError("Normalized meta features contain non-finite values.")
 
     dataset = TreelineDataset(image_paths=image_paths, meta_features=meta_norm, targets=targets)
 
@@ -279,11 +404,15 @@ def train(
     for epoch in range(epochs):
         model.train()
         train_losses = []
+        skipped_train_batches = 0
 
         for batch in train_loader:
             optimizer.zero_grad()
             preds = model(pixel_values=batch["pixel_values"], meta_features=batch["meta"])
             loss = criterion(preds, batch["target"])
+            if not torch.isfinite(loss):
+                skipped_train_batches += 1
+                continue
             loss.backward()
             optimizer.step()
             train_losses.append(loss.item())
@@ -291,21 +420,37 @@ def train(
         model.eval()
         val_losses = []
         val_abs = []
+        skipped_val_batches = 0
 
         with torch.no_grad():
             for batch in val_loader:
                 preds = model(pixel_values=batch["pixel_values"], meta_features=batch["meta"])
                 loss = criterion(preds, batch["target"])
+                if not torch.isfinite(loss):
+                    skipped_val_batches += 1
+                    continue
                 val_losses.append(loss.item())
                 val_abs.append(torch.mean(torch.abs(preds - batch["target"])).item())
 
-        train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
-        val_loss = float(np.mean(val_losses)) if val_losses else float("nan")
-        val_mae = float(np.mean(val_abs)) if val_abs else float("nan")
+        if not train_losses:
+            raise RuntimeError(
+                f"All train batches were non-finite in epoch {epoch + 1}. "
+                "Check image files and meta feature generation."
+            )
+        if not val_losses:
+            raise RuntimeError(
+                f"All validation batches were non-finite in epoch {epoch + 1}. "
+                "Check image files and meta feature generation."
+            )
+
+        train_loss = float(np.mean(train_losses))
+        val_loss = float(np.mean(val_losses))
+        val_mae = float(np.mean(val_abs))
 
         print(
             f"Epoch [{epoch + 1}/{epochs}] "
-            f"train_mse={train_loss:.4f} val_mse={val_loss:.4f} val_mae={val_mae:.4f}"
+            f"train_mse={train_loss:.4f} val_mse={val_loss:.4f} val_mae={val_mae:.4f} "
+            f"(skipped_train_batches={skipped_train_batches}, skipped_val_batches={skipped_val_batches})"
         )
 
     save_file = Path(save_path)
@@ -368,6 +513,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", type=str, required=True, help="Training CSV path")
     parser.add_argument("--images-dir", type=str, default="ViT/images", help="Directory with tiles")
     parser.add_argument("--save-path", type=str, default="image_meta_regressor.pt")
+    parser.add_argument(
+        "--meta-cache-csv",
+        type=str,
+        default=None,
+        help="Optional metadata cache CSV path. Defaults to <csv_stem>_meta_cache.csv next to training CSV.",
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -378,10 +529,14 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
+    ee.Authenticate()
+    ee.Initialize(project='caramel-park-488923-j2')
+
     train(
         csv_path=args.csv,
         images_dir=args.images_dir,
         save_path=args.save_path,
+        meta_cache_csv=args.meta_cache_csv,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,

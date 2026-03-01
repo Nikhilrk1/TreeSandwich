@@ -1,8 +1,6 @@
 import ee
 import datetime
  
-ee.Initialize(project='caramel-park-488923-j2')
- 
 def batch_average_ndvi_for_year(points, year=None, cloud_thresh=50, scale=20, fast_mode=True):
     """
     points: list of (lon, lat) tuples OR list of dicts {'id':..., 'lon':..., 'lat':...}
