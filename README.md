@@ -9,7 +9,7 @@ interface to highlight corridors where vegetation is encroaching on power lines.
 ## Quick Start — Running the Website
 
 ```bash
-# 1. Install dependencies
+# 1. Install dependencies and get the data from this google drive link: https://drive.google.com/drive/folders/1pqmy3RHQbmAuysHPyjF1ydSU-k6zv7y7?usp=drive_link
 pip install -r requirements.txt
 
 # 2. Start the API + frontend server
