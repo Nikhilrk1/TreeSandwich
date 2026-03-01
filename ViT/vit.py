@@ -1,0 +1,390 @@
+import argparse
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+from PIL import Image
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset, random_split
+from transformers import AutoImageProcessor, MobileViTModel
+
+from get_meta_feats import (
+    batch_average_ndvi_for_year,
+    batch_average_precip_last_year,
+    batch_average_temp_summer_winter,
+)
+
+
+class ImageMetaRegressor(nn.Module):
+    def __init__(
+        self,
+        meta_dim: int,
+        vit_output_dim: int = 640,
+        meta_emb_dim: int = 64,
+        fusion_hidden: int = 128,
+    ):
+        super().__init__()
+
+        self.backbone = MobileViTModel.from_pretrained("apple/mobilevit-small")
+
+        self.meta_mlp = nn.Sequential(
+            nn.Linear(meta_dim, meta_emb_dim),
+            nn.ReLU(),
+            nn.Linear(meta_emb_dim, meta_emb_dim),
+            nn.ReLU(),
+        )
+
+        fusion_in = vit_output_dim + meta_emb_dim
+        self.reg_head = nn.Sequential(
+            nn.Linear(fusion_in, fusion_hidden),
+            nn.ReLU(),
+            nn.Linear(fusion_hidden, 1),
+        )
+
+    def forward(self, pixel_values: torch.Tensor, meta_features: torch.Tensor) -> torch.Tensor:
+        img_emb = self.backbone(pixel_values=pixel_values).pooler_output
+        meta_emb = self.meta_mlp(meta_features)
+        fused = torch.cat([img_emb, meta_emb], dim=-1)
+        pred = self.reg_head(fused)
+        return pred.squeeze(-1)
+
+
+class TreelineDataset(Dataset):
+    def __init__(self, image_paths: Sequence[Path], meta_features: np.ndarray, targets: np.ndarray):
+        self.image_paths = list(image_paths)
+        self.meta_features = torch.tensor(meta_features, dtype=torch.float32)
+        self.targets = torch.tensor(targets, dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, idx: int) -> Dict[str, object]:
+        image = Image.open(self.image_paths[idx]).convert("RGB")
+        return {
+            "image": image,
+            "meta": self.meta_features[idx],
+            "target": self.targets[idx],
+        }
+
+
+def _build_image_candidates(feature_id: object, section_id: object, past_year_used: object) -> List[str]:
+    stem_old = f"tile_{feature_id}_{section_id}_old_{past_year_used}"
+    stem_now = f"tile_{feature_id}_{section_id}_now_{past_year_used}"
+    exts = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ""]
+    names = []
+    for stem in (stem_old, stem_now):
+        for ext in exts:
+            names.append(f"{stem}{ext}")
+    return names
+
+
+def _resolve_image_path(row: pd.Series, images_dir: Path) -> Optional[Path]:
+    candidates = _build_image_candidates(
+        row["feature_id"], row["section_id"], int(row["past_year_used"])
+    )
+    for name in candidates:
+        p = images_dir / name
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def _compute_meta_features(df: pd.DataFrame) -> np.ndarray:
+    points_by_year: Dict[int, List[Dict[str, object]]] = {}
+    for idx, row in df.iterrows():
+        year = int(row["past_year_used"])
+        points_by_year.setdefault(year, []).append(
+            {
+                "id": int(idx),
+                "lon": float(row["past_tree_lon"]),
+                "lat": float(row["past_tree_lat"]),
+            }
+        )
+
+    ndvi_map: Dict[int, float] = {}
+    precip_map: Dict[int, float] = {}
+    summer_map: Dict[int, float] = {}
+    winter_map: Dict[int, float] = {}
+
+    for year, points in points_by_year.items():
+        ndvi_res = batch_average_ndvi_for_year(points, year=year)
+        precip_res = batch_average_precip_last_year(points, year=year)
+        temp_res = batch_average_temp_summer_winter(points, year=year)
+
+        for r in ndvi_res:
+            ndvi_map[int(r["id"])] = float(r["ndvi"]) if r["ndvi"] is not None else np.nan
+        for r in precip_res:
+            precip_map[int(r["id"])] = (
+                float(r["precip"]) if r["precip"] is not None else np.nan
+            )
+        for r in temp_res:
+            summer_map[int(r["id"])] = (
+                float(r["summer_avg_c"]) if r["summer_avg_c"] is not None else np.nan
+            )
+            winter_map[int(r["id"])] = (
+                float(r["winter_avg_c"]) if r["winter_avg_c"] is not None else np.nan
+            )
+
+    meta_rows = []
+    for idx, row in df.iterrows():
+        rid = int(idx)
+        tree_num = float(row["past_ntrees"])
+        meta_rows.append(
+            [
+                tree_num,
+                ndvi_map.get(rid, np.nan),
+                precip_map.get(rid, np.nan),
+                summer_map.get(rid, np.nan),
+                winter_map.get(rid, np.nan),
+            ]
+        )
+
+    meta = np.array(meta_rows, dtype=np.float32)
+
+    col_means = np.nanmean(meta, axis=0)
+    all_nan_cols = np.isnan(col_means)
+    col_means[all_nan_cols] = 0.0
+
+    missing_mask = np.isnan(meta)
+    if missing_mask.any():
+        meta[missing_mask] = np.take(col_means, np.where(missing_mask)[1])
+
+    return meta
+
+
+def _load_training_frame(csv_path: Path, images_dir: Path) -> Tuple[pd.DataFrame, List[Path], np.ndarray, np.ndarray]:
+    df = pd.read_csv(csv_path)
+
+    required_cols = [
+        "feature_id",
+        "section_id",
+        "past_year_used",
+        "past_tree_lon",
+        "past_tree_lat",
+        "past_ntrees",
+        "delta_distance_m",
+    ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in {csv_path}: {missing}")
+
+    df = df.copy().reset_index(drop=True)
+
+    image_paths: List[Path] = []
+    keep_rows: List[int] = []
+
+    for i, row in df.iterrows():
+        resolved = _resolve_image_path(row, images_dir)
+        if resolved is not None:
+            image_paths.append(resolved)
+            keep_rows.append(i)
+
+    if not keep_rows:
+        raise ValueError(
+            f"No training rows had a matching image in {images_dir}. "
+            "Expected names like tile_{feature_id}_{section_id}_old_{past_year_used}.png"
+        )
+
+    if len(keep_rows) < len(df):
+        print(
+            f"Warning: {len(df) - len(keep_rows)} rows dropped because image files were not found."
+        )
+
+    df = df.iloc[keep_rows].reset_index(drop=True)
+
+    meta = _compute_meta_features(df)
+    targets = df["delta_distance_m"].astype(np.float32).to_numpy()
+
+    return df, image_paths, meta, targets
+
+
+def _make_collate_fn(processor: AutoImageProcessor, device: torch.device):
+    def collate(batch: Sequence[Dict[str, object]]) -> Dict[str, torch.Tensor]:
+        images = [item["image"] for item in batch]
+        meta = torch.stack([item["meta"] for item in batch]).to(device)
+        target = torch.stack([item["target"] for item in batch]).to(device)
+
+        inputs = processor(images=images, return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(device)
+
+        return {
+            "pixel_values": pixel_values,
+            "meta": meta,
+            "target": target,
+        }
+
+    return collate
+
+
+def train(
+    csv_path: str,
+    images_dir: str,
+    save_path: str = "image_meta_regressor.pt",
+    epochs: int = 10,
+    batch_size: int = 8,
+    lr: float = 1e-4,
+    train_ratio: float = 0.8,
+    seed: int = 42,
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on: {device}")
+
+    csv_file = Path(csv_path)
+    img_dir = Path(images_dir)
+
+    _, image_paths, meta, targets = _load_training_frame(csv_file, img_dir)
+
+    meta_mean = meta.mean(axis=0, keepdims=True)
+    meta_std = meta.std(axis=0, keepdims=True)
+    meta_std[meta_std == 0] = 1.0
+    meta_norm = (meta - meta_mean) / meta_std
+
+    dataset = TreelineDataset(image_paths=image_paths, meta_features=meta_norm, targets=targets)
+
+    if len(dataset) < 2:
+        raise ValueError("Need at least 2 samples after filtering to do an 80/20 split.")
+
+    train_len = int(len(dataset) * train_ratio)
+    train_len = max(1, min(train_len, len(dataset) - 1))
+    val_len = len(dataset) - train_len
+
+    g = torch.Generator().manual_seed(seed)
+    train_set, val_set = random_split(dataset, [train_len, val_len], generator=g)
+
+    processor = AutoImageProcessor.from_pretrained("apple/mobilevit-small")
+    collate_fn = _make_collate_fn(processor=processor, device=device)
+
+    train_loader = DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=0,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=0,
+    )
+
+    model = ImageMetaRegressor(meta_dim=meta.shape[1]).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+
+    for epoch in range(epochs):
+        model.train()
+        train_losses = []
+
+        for batch in train_loader:
+            optimizer.zero_grad()
+            preds = model(pixel_values=batch["pixel_values"], meta_features=batch["meta"])
+            loss = criterion(preds, batch["target"])
+            loss.backward()
+            optimizer.step()
+            train_losses.append(loss.item())
+
+        model.eval()
+        val_losses = []
+        val_abs = []
+
+        with torch.no_grad():
+            for batch in val_loader:
+                preds = model(pixel_values=batch["pixel_values"], meta_features=batch["meta"])
+                loss = criterion(preds, batch["target"])
+                val_losses.append(loss.item())
+                val_abs.append(torch.mean(torch.abs(preds - batch["target"])).item())
+
+        train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
+        val_loss = float(np.mean(val_losses)) if val_losses else float("nan")
+        val_mae = float(np.mean(val_abs)) if val_abs else float("nan")
+
+        print(
+            f"Epoch [{epoch + 1}/{epochs}] "
+            f"train_mse={train_loss:.4f} val_mse={val_loss:.4f} val_mae={val_mae:.4f}"
+        )
+
+    save_file = Path(save_path)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "meta_dim": int(meta.shape[1]),
+            "meta_mean": meta_mean.astype(np.float32),
+            "meta_std": meta_std.astype(np.float32),
+            "train_ratio": train_ratio,
+            "seed": seed,
+        },
+        save_file,
+    )
+
+    print(f"Model saved to {save_file.resolve()}")
+
+
+def inference(
+    model_path: str,
+    image_path: str,
+    meta_features: Sequence[float],
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Inference on: {device}")
+
+    checkpoint = torch.load(model_path, map_location=device)
+    meta_dim = int(checkpoint["meta_dim"])
+
+    if len(meta_features) != meta_dim:
+        raise ValueError(f"Expected {meta_dim} meta features, got {len(meta_features)}")
+
+    processor = AutoImageProcessor.from_pretrained("apple/mobilevit-small")
+    model = ImageMetaRegressor(meta_dim=meta_dim).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    image = Image.open(image_path).convert("RGB")
+    inputs = processor(images=[image], return_tensors="pt")
+    pixel_values = inputs["pixel_values"].to(device)
+
+    meta = np.array(meta_features, dtype=np.float32).reshape(1, -1)
+    meta_mean = checkpoint.get("meta_mean")
+    meta_std = checkpoint.get("meta_std")
+    if meta_mean is not None and meta_std is not None:
+        meta = (meta - meta_mean) / np.where(meta_std == 0, 1.0, meta_std)
+
+    meta_tensor = torch.tensor(meta, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        pred = model(pixel_values=pixel_values, meta_features=meta_tensor)
+
+    value = float(pred.cpu().numpy()[0])
+    print(f"Prediction: {value}")
+    return value
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train ViT + metadata regressor for treeline distance.")
+    parser.add_argument("--csv", type=str, required=True, help="Training CSV path")
+    parser.add_argument("--images-dir", type=str, default="ViT/images", help="Directory with tiles")
+    parser.add_argument("--save-path", type=str, default="image_meta_regressor.pt")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    train(
+        csv_path=args.csv,
+        images_dir=args.images_dir,
+        save_path=args.save_path,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        train_ratio=args.train_ratio,
+        seed=args.seed,
+    )

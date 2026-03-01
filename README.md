@@ -59,9 +59,56 @@ All-US transmission lines overlay is loaded from:
 - default:
   - `US_Electric_Power_Transmission_Lines_-6976209181916424225.geojson`
 
-## API Endpoints Used by Frontend
-- `GET /timeline/years`
-- `GET /map/layer?year=YYYY[&bbox=minx,miny,maxx,maxy]`
-- `GET /segments/top?year=YYYY&n=20`
-- `GET /segments/{segment_id}/timeseries`
-- `GET /powerlines/layer?bbox=minx,miny,maxx,maxy`
+### Real Corridor Segmenting
+Given a real line dataset with `corridor_id`:
+```bash
+python scripts/build_segments.py \
+  --input data/corridors.geojson \
+  --corridor-id-col corridor_id \
+  --segment-length-m 500 \
+  --buffer-m 50 \
+  --out-segments-geojson data/segments_centerline.geojson \
+  --out-buffers-geojson data/segments_buffer.geojson \
+  --out-metadata-csv data/segment_metadata.csv
+```
+
+Given monthly NDVI rasters (for example `ndvi_2025-07.tif`) and segment buffers:
+```bash
+python scripts/extract_segment_ndvi_stats.py \
+  --segments data/segments_buffer.geojson \
+  --centerlines data/segments_centerline.geojson \
+  --segment-id-col segment_id \
+  --raster-glob 'data/ndvi/ndvi_*.tif' \
+  --date-regex '(\\d{4}-\\d{2})' \
+  --output data/segment_features.parquet
+
+python -m vegetation_vision.pipeline \
+  --input data/segment_features.parquet \
+  --input-grain feature \
+  --output data/segment_timeseries.parquet
+```
+
+Precompute map layers for caching/performance:
+```bash
+python scripts/precompute_monthly_layers.py \
+  --timeseries data/segment_timeseries.parquet \
+  --segments data/segments.geojson \
+  --outdir data/layers
+```
+
+### Notes
+- `hazard_level` is based on vegetation distance-to-line thresholds
+  (`critical <=2m`, `high <=5m`, `medium <=10m`, else `low`).
+- Forecast output focuses on `predicted_growth_amount_m` and projected
+  `predicted_distance_m`, not forecast NDVI.
+- NDVI quality masking and monthly compositing are assumed upstream.
+- Geometry for map playback is loaded from `VV_SEGMENT_GEOJSON`
+  (default `data/segments.geojson`).
+- US powerline overlay is loaded from `VV_POWERLINES_GEOJSON`
+  (default `US_Electric_Power_Transmission_Lines_-6976209181916424225.geojson`).
+
+
+  ## How To Generate Satellite Images
+  - Download the Fhsh and wildlife power line dataset from https://gis-fws.opendata.arcgis.com/datasets/fws::us-electric-power-transmission-lines/explore?location=34.140142%2C-81.587457%2C9. Name it lines.geojson 
+  - Run createSatteliteImages.py
+  - example for SC:  python createSatteliteImages.py --input lines.geojson --outdir out_tiles_gee --size 1024 --dpi 150 --dataset naip --lookback 5 --sc-only
