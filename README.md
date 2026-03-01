@@ -66,6 +66,7 @@ python -m uvicorn backend.main:app --reload
 - `/health`
 - `/timeline/years`
 - `/map/layer?year=2025`
+- `/powerlines/layer?bbox=-125,24,-66,49`
 - `/segments/top?year=2025&n=25`
 - `/segments/{segment_id}/timeseries`
 - `/segments/{segment_id}/forecast`
@@ -115,3 +116,5 @@ python scripts/precompute_monthly_layers.py \
 - NDVI quality masking and monthly compositing are assumed upstream.
 - Geometry for map playback is loaded from `VV_SEGMENT_GEOJSON`
   (default `data/segments.geojson`).
+- US powerline overlay is loaded from `VV_POWERLINES_GEOJSON`
+  (default `US_Electric_Power_Transmission_Lines_-6976209181916424225.geojson`).
