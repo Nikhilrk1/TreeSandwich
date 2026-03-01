@@ -36,7 +36,7 @@ python scripts/generate_mock_segments.py \
 
 ## 5) Run backend + app
 ```bash
-uvicorn backend.main:app --reload
+python -m uvicorn backend.main:app --reload
 ```
 Open:
 - `http://127.0.0.1:8000/app`

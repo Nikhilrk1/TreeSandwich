@@ -56,7 +56,7 @@ python scripts/generate_mock_segments.py \
 
 5. Run API:
 ```bash
-uvicorn backend.main:app --reload
+python -m uvicorn backend.main:app --reload
 ```
 
 6. Open app:
