@@ -14,6 +14,10 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: "&copy; OpenStreetMap",
 }).addTo(map);
 
+map.createPane("powerlinesPane");
+map.getPane("powerlinesPane").style.zIndex = 330;
+map.getPane("powerlinesPane").style.pointerEvents = "none";
+
 const heatLayer = L.layerGroup().addTo(map);
 
 let years = [];
@@ -21,10 +25,13 @@ let currentYearIdx = 0;
 let playing = false;
 let playTimer = null;
 let segmentLineLayer = null;
+let powerlineLayer = null;
 let segmentLookup = new Map();
 let activeSegment = null;
 let currentGeojson = null;
 let hasAutoFit = false;
+let powerlineRequestId = 0;
+let lastPowerlineBboxKey = "";
 
 function hazardRank(level) {
   const key = String(level || "").toLowerCase();
@@ -177,6 +184,48 @@ function clearMapLayers() {
     map.removeLayer(segmentLineLayer);
     segmentLineLayer = null;
   }
+}
+
+function mapBoundsToBbox(bounds) {
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  return `${sw.lng.toFixed(4)},${sw.lat.toFixed(4)},${ne.lng.toFixed(4)},${ne.lat.toFixed(4)}`;
+}
+
+function renderPowerlineOverlay(geojson) {
+  if (powerlineLayer) {
+    map.removeLayer(powerlineLayer);
+    powerlineLayer = null;
+  }
+  powerlineLayer = L.geoJSON(geojson, {
+    pane: "powerlinesPane",
+    interactive: false,
+    style: () => ({
+      color: "#0B2F78",
+      weight: map.getZoom() >= 8 ? 1.6 : 1.1,
+      opacity: 0.82,
+    }),
+  }).addTo(map);
+}
+
+function refreshPowerlineOverlay(force = false) {
+  const bbox = mapBoundsToBbox(map.getBounds());
+  if (!force && bbox === lastPowerlineBboxKey) {
+    return;
+  }
+  lastPowerlineBboxKey = bbox;
+
+  const requestId = ++powerlineRequestId;
+  getJson(`/powerlines/layer?bbox=${encodeURIComponent(bbox)}&max_features=18000`)
+    .then((geojson) => {
+      if (requestId !== powerlineRequestId) {
+        return;
+      }
+      renderPowerlineOverlay(geojson);
+    })
+    .catch(() => {
+      // Keep app responsive even if optional overlay data is missing.
+    });
 }
 
 function styleForSegment(item, zoom) {
@@ -613,6 +662,7 @@ async function loadYear() {
   if (!activeSegment && topResult.status === "fulfilled" && topResult.value.length) {
     selectSegment(topResult.value[0].segment_id, false);
   }
+  refreshPowerlineOverlay(true);
 }
 
 async function initialize() {
@@ -636,7 +686,11 @@ async function initialize() {
       loadYear();
     });
     playBtn.addEventListener("click", () => setPlaying(!playing));
-    map.on("zoomend", refreshMapVisualization);
+    map.on("zoomend", () => {
+      refreshMapVisualization();
+      refreshPowerlineOverlay(false);
+    });
+    map.on("moveend", () => refreshPowerlineOverlay(false));
 
     await loadYear();
   } catch (err) {
