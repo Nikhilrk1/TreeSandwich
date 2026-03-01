@@ -3,7 +3,7 @@
 This is a static map UI for the Vegetation Vision MVP.
 
 ## Served by FastAPI
-When running `uvicorn backend.main:app --reload`, open:
+When running `python -m uvicorn backend.main:app --reload`, open:
 - `http://127.0.0.1:8000/app`
 
 The page calls backend endpoints:
