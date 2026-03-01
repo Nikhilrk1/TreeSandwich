@@ -24,10 +24,14 @@ def build_mock_pixels(
         base = rng.uniform(0.25, 0.65)
         trend = rng.uniform(-0.005, 0.02)
         phase = rng.uniform(0.0, np.pi)
+        initial_distance_m = rng.uniform(4.0, 18.0)
+        encroachment_rate = rng.uniform(0.0, 0.45)
 
         for i, date in enumerate(dates):
             seasonal = 0.08 * np.sin((2 * np.pi * (date.month - 1) / 12.0) + phase)
             monthly_center = base + seasonal + trend * i
+            seasonal_push = max(0.0, np.sin((2 * np.pi * (date.month - 1) / 12.0) + phase)) * 0.15
+            distance_m = max(0.5, initial_distance_m - (encroachment_rate * i) - seasonal_push)
 
             for _ in range(pixels_per_segment_month):
                 cloud_free = rng.random() > 0.18
@@ -42,6 +46,7 @@ def build_mock_pixels(
                         "is_valid": int(valid),
                         "is_cloud_free": int(cloud_free),
                         "expected_pixels": pixels_per_segment_month,
+                        "vegetation_distance_m": distance_m,
                     }
                 )
 

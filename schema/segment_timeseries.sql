@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS segment_timeseries (
   segment_month_baseline_iqr REAL,
   ndvi_anomaly REAL,
   ndvi_anomaly_z REAL,
+  vegetation_distance_m REAL,
+  growth_amount_m REAL,
+  growth_rate_m_per_month REAL,
   obs_count INTEGER,
   expected_pixels INTEGER,
   valid_pixel_frac REAL,
@@ -31,10 +34,15 @@ CREATE TABLE IF NOT EXISTS segment_timeseries (
 
   risk_score REAL NOT NULL,
   risk_level TEXT NOT NULL,
+  hazard_level TEXT,
   risk_confidence REAL NOT NULL,
 
   forecast_lower REAL,
   forecast_upper REAL,
+  predicted_growth_amount_m REAL,
+  growth_lower_m REAL,
+  growth_upper_m REAL,
+  predicted_distance_m REAL,
   model_version TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

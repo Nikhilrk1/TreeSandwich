@@ -7,9 +7,9 @@ When running `uvicorn backend.main:app --reload`, open:
 - `http://127.0.0.1:8000/app`
 
 The page calls backend endpoints:
-- `/timeline/months`
-- `/map/layer?date=YYYY-MM`
-- `/segments/top?date=YYYY-MM`
+- `/timeline/years`
+- `/map/layer?year=YYYY`
+- `/segments/top?year=YYYY`
 - `/segments/{segment_id}/timeseries`
 - `/segments/{segment_id}/forecast`
 
