@@ -21,11 +21,17 @@ POWERLINES_GEOJSON_PATH = os.getenv(
 )
 DEFAULT_BBOX_HALF_DEG = float(os.getenv("VV_DEFAULT_BBOX_HALF_DEG", "0.004"))
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+VIT_DIR = PROJECT_ROOT / "ViT"
 YEARS = list(range(2025, 2031))
 
 app = FastAPI(title="TreeSandwich API", version="0.2.0")
 if FRONTEND_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+if PROJECT_ROOT.exists():
+    app.mount("/files", StaticFiles(directory=str(PROJECT_ROOT), html=False), name="files")
+if VIT_DIR.exists():
+    app.mount("/ViT", StaticFiles(directory=str(VIT_DIR), html=False), name="vit")
 
 
 def _normalize_bbox(value: str) -> tuple[float, float, float, float]:
@@ -198,6 +204,8 @@ def _prepare_predictions_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
         df["label"] = "feature " + df["feature_id"].astype(str) + " sec " + df["section_id"].astype(str)
     else:
         df["label"] = df["segment_id"]
+    image_col = _first_existing_column(df, ["image_path", "image", "img_path"], label="image path", required=False)
+    df["image_path"] = df[image_col] if image_col else None
 
     keep_cols = [
         "segment_id",
@@ -212,6 +220,7 @@ def _prepare_predictions_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
         "new_distance_m",
         "growth_rate_2y_m",
         "annual_growth_m_per_year",
+        "image_path",
     ]
     out = df[keep_cols].copy()
     out = out.dropna(subset=["segment_id", "center_lon", "center_lat", "original_distance_m", "new_distance_m", "growth_rate_2y_m"])
@@ -343,6 +352,7 @@ def map_layer(
             "growth_rate_2y_m": float(row["growth_rate_2y_m"]),
             "annual_growth_m_per_year": float(row["annual_growth_m_per_year"]),
             "distance_change_vs_2025_m": float(row["distance_change_vs_2025_m"]),
+            "image_path": row["image_path"] if pd.notna(row["image_path"]) else None,
             "bbox_min_lon": float(row["bbox_min_lon"]),
             "bbox_min_lat": float(row["bbox_min_lat"]),
             "bbox_max_lon": float(row["bbox_max_lon"]),
@@ -405,6 +415,7 @@ def top_segments(
                 "annual_growth_m_per_year",
                 "distance_change_vs_2025_m",
                 "trend_arrow",
+                "image_path",
                 "center_lon",
                 "center_lat",
             ]

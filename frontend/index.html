@@ -67,11 +67,22 @@
       </section>
     </main>
 
+    <div id="imageModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="imageModalTitle">
+      <div class="image-modal-card">
+        <div class="image-modal-head">
+          <h3 id="imageModalTitle">Corridor Image</h3>
+          <button id="imageModalClose" class="image-modal-close" type="button" aria-label="Close image popup">Close</button>
+        </div>
+        <p id="imageModalMeta" class="mono"></p>
+        <img id="imageModalImg" class="image-modal-img" alt="Segment satellite image" />
+      </div>
+    </div>
+
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
     ></script>
-    <script src="./app.js?v=6"></script>
+    <script src="./app.js?v=10"></script>
   </body>
 </html>

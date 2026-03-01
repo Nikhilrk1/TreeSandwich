@@ -7,6 +7,11 @@ const topList = document.getElementById("topList");
 const segmentTitle = document.getElementById("segmentTitle");
 const segmentMeta = document.getElementById("segmentMeta");
 const chartSvg = document.getElementById("chart");
+const imageModal = document.getElementById("imageModal");
+const imageModalClose = document.getElementById("imageModalClose");
+const imageModalMeta = document.getElementById("imageModalMeta");
+const imageModalImg = document.getElementById("imageModalImg");
+
 
 const map = L.map("map", { zoomControl: true }).setView([33.8361, -81.1637], 8);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -68,6 +73,75 @@ function tagTextColor(distanceM) {
 function fmtFloat(value, digits = 2) {
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(digits) : "--";
+}
+
+function buildImageCandidates(imagePath) {
+  const raw = String(imagePath || "").trim();
+  if (!raw) return [];
+  if (/^https?:\/\//i.test(raw)) return [raw];
+
+  const normalized = raw.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/^\/+/, "");
+  const encodedPath = normalized
+    .split("/")
+    .filter((part) => part.length > 0)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+
+  const candidates = [
+    `${API_BASE}/${encodedPath}`,
+    `${API_BASE}/files/${encodedPath}`,
+    normalized,
+  ];
+
+  return [...new Set(candidates.filter((v) => v))];
+}
+
+function closeImageModal() {
+  imageModal.classList.add("hidden");
+  imageModalImg.removeAttribute("src");
+}
+
+function openImageModal(segmentId, imagePath) {
+  const path = String(imagePath || "").trim();
+  imageModal.classList.remove("hidden");
+  imageModalImg.style.display = "none";
+  imageModalImg.removeAttribute("src");
+  imageModalImg.onload = null;
+  imageModalImg.onerror = null;
+
+  if (!path) {
+    imageModalMeta.textContent = `${segmentId}: no image path available`;
+    return;
+  }
+
+  const candidates = buildImageCandidates(path);
+  if (!candidates.length) {
+    imageModalMeta.textContent = `${segmentId}: no usable image URL candidates`;
+    return;
+  }
+
+  imageModalMeta.textContent = `${segmentId}: loading image...`;
+  imageModalImg.alt = `Segment image for ${segmentId}`;
+
+  const tryAt = (idx) => {
+    if (idx >= candidates.length) {
+      imageModalMeta.textContent = `${segmentId}: image could not be loaded (${path})`;
+      imageModalImg.style.display = "none";
+      return;
+    }
+
+    const url = candidates[idx];
+    imageModalImg.onload = () => {
+      imageModalImg.style.display = "block";
+      imageModalMeta.textContent = `${segmentId}: ${path}`;
+    };
+    imageModalImg.onerror = () => {
+      tryAt(idx + 1);
+    };
+    imageModalImg.src = url;
+  };
+
+  tryAt(0);
 }
 
 async function getJson(path) {
@@ -140,6 +214,7 @@ function buildRecordFromFeature(feature) {
     growthRate2yM: Number(props.growth_rate_2y_m),
     annualGrowthM: Number(props.annual_growth_m_per_year),
     year: Number(props.year),
+    imagePath: props.image_path ? String(props.image_path) : "",
   };
 }
 
@@ -408,19 +483,54 @@ function renderTopList(items) {
   for (const item of items) {
     const li = document.createElement("li");
     li.className = "risk-item";
-    const trendArrow = item.trend_arrow === "up" ? "▲" : item.trend_arrow === "down" ? "▼" : "▶";
+    li.dataset.segmentId = item.segment_id;
     const badgeColor = distanceColor(item.distance_m);
     const badgeTextColor = tagTextColor(item.distance_m);
-    li.innerHTML = `
-      <div class="risk-row">
-        <span class="risk-id">${item.segment_id}</span>
-        <span class="pill" style="background:${badgeColor};color:${badgeTextColor};border:1px solid rgba(18,33,63,0.28);">${distanceBand(item.distance_m)}</span>
-      </div>
-      <div class="risk-row">
-        <span class="mono">Distance ${fmtFloat(item.distance_m)} m</span>
-        <span class="mono">${trendArrow}</span>
-      </div>
-    `;
+
+    const topRow = document.createElement("div");
+    topRow.className = "risk-row";
+
+    const idSpan = document.createElement("span");
+    idSpan.className = "risk-id";
+    idSpan.textContent = item.segment_id;
+
+    const pill = document.createElement("span");
+    pill.className = "pill";
+    pill.style.background = badgeColor;
+    pill.style.color = badgeTextColor;
+    pill.style.border = "1px solid rgba(18,33,63,0.28)";
+    pill.textContent = distanceBand(item.distance_m);
+
+    topRow.appendChild(idSpan);
+    topRow.appendChild(pill);
+
+    const secondRow = document.createElement("div");
+    secondRow.className = "risk-row";
+
+    const distanceSpan = document.createElement("span");
+    distanceSpan.className = "mono";
+    distanceSpan.textContent = `Distance ${fmtFloat(item.distance_m)} m`;
+
+    const imageBtn = document.createElement("button");
+    imageBtn.className = "point-icon-btn";
+    imageBtn.type = "button";
+    imageBtn.textContent = "Img";
+    imageBtn.title = "View segment image";
+    imageBtn.setAttribute("aria-label", `Open image for ${item.segment_id}`);
+    imageBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openImageModal(item.segment_id, item.image_path);
+    });
+
+    const actionsWrap = document.createElement("div");
+    actionsWrap.className = "risk-row-actions";
+    actionsWrap.appendChild(imageBtn);
+
+    secondRow.appendChild(distanceSpan);
+    secondRow.appendChild(actionsWrap);
+
+    li.appendChild(topRow);
+    li.appendChild(secondRow);
     li.addEventListener("click", () => selectSegment(item.segment_id, true));
     topList.appendChild(li);
   }
@@ -499,6 +609,12 @@ async function selectSegment(segmentId, zoomToFeature = false) {
   segmentTitle.textContent = segmentId;
   segmentMeta.textContent = "loading...";
 
+  // Scroll the corresponding sidebar item into view
+  const sidebarItem = topList.querySelector(`[data-segment-id="${CSS.escape(segmentId)}"]`);
+  if (sidebarItem) {
+    sidebarItem.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
   const local = recordsById.get(segmentId);
   if (zoomToFeature && local?.bounds?.isValid()) {
     map.fitBounds(local.bounds.pad(0.45), { maxZoom: 14 });
@@ -557,6 +673,13 @@ async function loadYear() {
 
 async function initialize() {
   try {
+    imageModalClose.addEventListener("click", closeImageModal);
+    imageModal.addEventListener("click", (ev) => {
+      if (ev.target === imageModal) closeImageModal();
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && !imageModal.classList.contains("hidden")) closeImageModal();
+    });
     const timeline = await getJson("/timeline/years");
     years = timeline.years || [2025, 2026, 2027, 2028, 2029, 2030];
 
