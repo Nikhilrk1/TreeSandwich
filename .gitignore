@@ -2,7 +2,6 @@
 __pycache__/
 *.py[codz]
 *$py.class
-*.png
 
 # C extensions
 *.so
@@ -209,3 +208,5 @@ __marimo__/
 
 *.geojson
 *.csv
+*.png
+*.zip
